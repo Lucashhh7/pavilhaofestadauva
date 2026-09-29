@@ -1,0 +1,531 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Mapeamento de Equipamentos - Festa da Uva</title>
+
+  <link rel="stylesheet" href="./style.css">
+  
+  <!-- Leaflet CSS & JS -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+  <!-- Supabase JS Client -->
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+
+  <style>
+    /* Estilos adicionais personalizados se necessário */
+
+    /* Destaque piscante em vermelho para equipamentos associados a um Rack.
+       IMPORTANTE: esta animação NUNCA pode mexer em "transform" — o Leaflet usa
+       translate3d(x,y,0) inline no próprio ícone para posicioná-lo no mapa, e
+       qualquer transform daqui sobrescreveria isso, fazendo o marcador "pular"
+       para o canto do mapa durante o piscar. Por isso só animamos filter/opacity. */
+    @keyframes piscarVermelho {
+      0%, 100% {
+        filter: drop-shadow(0 0 14px #ff1744) drop-shadow(0 0 14px #ff1744) brightness(1.3);
+        opacity: 1;
+      }
+      50% {
+        filter: drop-shadow(0 0 2px #ff1744);
+        opacity: 0.25;
+      }
+    }
+    .piscar-vermelho {
+      animation: piscarVermelho 0.5s ease-in-out 8;
+      z-index: 10000 !important;
+    }
+
+    /* Destaque piscante para o slot U de um rack, usado quando a busca aponta um item dentro do rack */
+    @keyframes flashSlotRack {
+      0%, 100% { background: rgba(255, 23, 68, 0.05); }
+      50% { background: rgba(255, 23, 68, 0.55); }
+    }
+    .destaque-slot-rack {
+      animation: flashSlotRack 0.5s ease-in-out 6;
+    }
+  </style>
+</head>
+<body>
+
+<!-- TELA DE LOGIN / CADASTRO OBRIGATÓRIA INICIAL -->
+  <div id="login-overlay" class="login-overlay" style="display: none;">
+    <div class="login-card">
+      <h2 id="titulo-login-card">Acesso ao Sistema</h2>
+      <p id="subtitulo-login-card">Faça login para visualizar o mapa e os equipamentos de rede.</p>
+
+      <form id="form-login-inicial">
+        <div class="form-group">
+          <label>E-mail:</label>
+          <input type="email" id="login-email" required placeholder="usuario@empresa.com">
+        </div>
+        <div class="form-group">
+          <label>Senha:</label>
+          <input type="password" id="login-senha" required placeholder="••••••••">
+        </div>
+
+        <div id="login-erro" class="login-erro" style="display: none;"></div>
+
+        <button type="submit" id="btn-login-submit" class="btn-submit">Entrar no Sistema</button>
+      </form>
+
+      <!-- Botão para alternar entre Login e Cadastro -->
+      <div style="margin-top: 15px; text-align: center;">
+        <button type="button" id="btn-toggle-cadastro" onclick="alternarTelaLoginCadastro()" style="background: none; border: none; color: #3b82f6; cursor: pointer; font-size: 0.85rem; text-decoration: underline;">
+          Não tem uma conta? Cadastre-se
+        </button>
+      </div>
+    </div>
+  </div>
+
+<!-- BARRA DE FERRAMENTAS SUPERIOR -->
+<div id="top-bar">
+  <!-- Botões de leitura (sempre visíveis por padrão) -->
+  <button id="btn-patch-notes" class="tool-btn" onclick="abrirModalPatchNotes()" title="Ver novidades e atualizações"><span>🚀</span> Patch Notes</button>
+  <button id="btn-buscar" class="tool-btn" onclick="abrirModalBusca()" title="Buscar equipamento por nome, MAC ou modelo"><span>🔎</span> Buscar</button>
+  <button id="btn-relatorio" class="tool-btn" onclick="abrirModalRelatorio()" title="Gerar Relatório Geral">📊 Relatório Geral</button>
+  
+  <!-- Botões de edição (escondidos por padrão com display: none) -->
+  <button class="tool-btn btn-adm-only" onclick="selecionarTipo('Texto', this)" style="display: none;"><span>✏️</span> Escrever Texto</button>
+  <button class="tool-btn btn-adm-only" onclick="selecionarTipo('AP', this)" style="display: none;"><span>📡</span> AP</button>
+  <button class="tool-btn btn-adm-only" onclick="selecionarTipo('Roteador', this)" style="display: none;"><span>🌐</span> Roteador</button>
+  <button class="tool-btn btn-adm-only" onclick="selecionarTipo('Switch', this)" style="display: none;"><span>🔀</span> Switch</button>
+  <button class="tool-btn btn-adm-only" onclick="selecionarTipo('Rack', this)" style="display: none;"><span>🗄️</span> Rack</button>
+  <button class="tool-btn btn-adm-only" onclick="selecionarTipo('Outro', this)" style="display: none;"><span>📦</span> Outro</button>
+  
+  <div style="width: 1px; height: 25px; background: #444; margin: 0 5px;"></div>
+  <button id="tag-modo-exibicao" style="background: #2563eb; color: #fff; border-radius: 20px; padding: 4px 10px; border: none; font-size: 0.75rem; font-weight: bold; pointer-events: none;"></button>
+  <button id="btn-auth" class="auth-btn" onclick="fazerLogout()">🚪 Sair</button>
+</div>
+
+  <div id="map"></div>
+
+  <!-- Modal de Busca Inteligente de Equipamentos -->
+  <div class="modal-overlay" id="modal-busca" style="display: none;">
+    <div class="modal-content" style="max-width: 480px;">
+      <div class="modal-header">
+        <h2>🔎 Buscar Equipamento</h2>
+        <button class="close-btn" onclick="fecharModalBusca()">&times;</button>
+      </div>
+
+      <div class="form-group">
+        <input type="text" id="input-busca-equipamento" placeholder="Digite nome, MAC, modelo... Ex: AP 14" oninput="executarBusca(this.value)" autocomplete="off">
+      </div>
+
+      <div id="resultados-busca" style="max-height: 360px; overflow-y: auto; display: flex; flex-direction: column; gap: 6px;"></div>
+    </div>
+  </div>
+  
+
+ <!-- Modal de Patch Notes com Mídia / Prints -->
+<div class="modal-overlay" id="modal-patch-notes" style="display: none;">
+  <div class="modal-content" style="max-width: 720px; max-height: 85vh; display: flex; flex-direction: column; background: #0f172a; border: 1px solid #334155;">
+    
+    <!-- Cabeçalho da Modal -->
+    <div class="modal-header" style="border-bottom: 1px solid #334155; padding-bottom: 12px;">
+      <h2 style="display: flex; align-items: center; gap: 8px; margin: 0; color: #f8fafc;">
+        <span>🚀</span> Novidades e Atualizações do Sistema
+      </h2>
+      <button class="close-btn" onclick="fecharModalPatchNotes()">&times;</button>
+    </div>
+
+    <!-- Conteúdo Rolavel -->
+    <div style="overflow-y: auto; flex-grow: 1; padding-right: 8px; margin-top: 15px;">
+
+      <!-- VERSÃO ATUAL (2.1.0) -->
+      <div style="background: #1e293b; border: 1px solid #3b82f6; border-radius: 10px; padding: 16px; margin-bottom: 20px;">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
+          <span style="font-weight: bold; font-size: 1.1rem; color: #60a5fa; display: flex; align-items: center; gap: 6px;">
+            <span style="background: #2563eb; color: #fff; padding: 2px 8px; border-radius: 6px; font-size: 0.8rem;">v2.1.0</span>
+            Atualização Visual & Busca Inteligente
+          </span>
+          <span style="font-size: 0.75rem; color: #94a3b8; background: #0f172a; padding: 4px 10px; border-radius: 12px; border: 1px solid #334155;">29/09/2026</span>
+        </div>
+
+        <!-- Destaques-->
+
+        <div style="margin-top: 14px; background: #0f172a; border-radius: 8px; padding: 12px; border: 1px solid #334155;">
+          <h4 style="margin: 0 0 6px 0; color: #4ade80; font-size: 0.95rem; display: flex; align-items: center; gap: 6px;">
+            <span>🔎</span> Pesquisar Item
+          </h4>
+          <p style="margin: 0 0 10px 0; font-size: 0.85rem; color: #cbd5e1;">
+            Agora ao Pesquisar por um item, o usuário é automaticamente redirecionado para o equipamento correspondente.
+          </p>
+          <!-- Print / Imagem da funcionalidade -->
+          <div style="border-radius: 6px; overflow: hidden; border: 1px solid #475569;">
+            <a href="./img/patch_busca_demo.png" target="_blank" title="Clique para ampliar">
+              <img src="/note/pt2.png" alt="Demonstração da Busca" style="width: 100%; max-height: 200px; object-fit: cover; display: block;" onerror="this.style.display='none'">
+            </a>
+          </div>
+        </div>
+
+        <div style="margin-top: 14px; background: #0f172a; border-radius: 8px; padding: 12px; border: 1px solid #334155;">
+          <h4 style="margin: 0 0 6px 0; color: #4ade80; font-size: 0.95rem; display: flex; align-items: center; gap: 6px;">
+            <span>🔎</span> Reformulação do Menu de Relatórios
+          </h4>
+          <p style="margin: 0 0 10px 0; font-size: 0.85rem; color: #cbd5e1;">
+            Agora o menu de relatórios foi reformulado para mostrar informações de forma mais clara e organizada.
+          </p>
+          <!-- Print / Imagem da funcionalidade -->
+          <div style="border-radius: 6px; overflow: hidden; border: 1px solid #475569;">
+            <a href="./img/patch_busca_demo.png" target="_blank" title="Clique para ampliar">
+              <img src="/note/pt3.png" alt="Demonstração da Busca" style="width: 100%; max-height: 200px; object-fit: cover; display: block;" onerror="this.style.display='none'">
+            </a>
+          </div>
+        </div>
+
+        <!-- DESTAQUE 1: Busca Inteligente com Imagem -->
+        <div style="margin-top: 14px; background: #0f172a; border-radius: 8px; padding: 12px; border: 1px solid #334155;">
+          <h4 style="margin: 0 0 6px 0; color: #4ade80; font-size: 0.95rem; display: flex; align-items: center; gap: 6px;">
+            <span>🔎</span> Busca Inteligente no Mapa
+          </h4>
+          <p style="margin: 0 0 10px 0; font-size: 0.85rem; color: #cbd5e1;">
+            Agora é possivel localizar equipamentos ligados a cada rack com uma animação de destaque.
+          </p>
+          <!-- Print / Imagem da funcionalidade -->
+          <div style="border-radius: 6px; overflow: hidden; border: 1px solid #475569;">
+            <a href="./img/patch_busca_demo.png" target="_blank" title="Clique para ampliar">
+              <img src="/note/pt4.png" alt="Demonstração da Busca" style="width: 100%; max-height: 200px; object-fit: cover; display: block;" onerror="this.style.display='none'">
+            </a>
+          </div>
+        </div>
+
+        <!-- DESTAQUE 2: Rack Interno com Imagem -->
+        <div style="margin-top: 14px; background: #0f172a; border-radius: 8px; padding: 12px; border: 1px solid #334155;">
+          <h4 style="margin: 0 0 6px 0; color: #38bdf8; font-size: 0.95rem; display: flex; align-items: center; gap: 6px;">
+            <span>🗄️</span> Gestão Visual de Pesquisa de itens no Mapa
+          </h4>
+          <p style="margin: 0 0 10px 0; font-size: 0.85rem; color: #cbd5e1;">
+            Agora é possivel pesquisar itens no mapa e ver a lista de resultados agrupados por área, com destaque visual para cada item encontrado.
+          </p>
+          <!-- Print / Imagem da funcionalidade -->
+          <div style="border-radius: 6px; overflow: hidden; border: 1px solid #475569;">
+            <a href="./img/patch_rack_demo.png" target="_blank" title="Clique para ampliar">
+              <img src="/note/pt1.png" alt="Botão de Pesquisa de itens" style="width: 100%; max-height: 200px; object-fit: cover; display: block;" onerror="this.style.display='none'">
+            </a>
+          </div>
+        </div>
+
+        <!-- LISTA DE OUTRAS MELHORIAS -->
+        <div style="margin-top: 14px;">
+          <h5 style="margin: 0 0 6px 0; color: #94a3b8; font-size: 0.85rem;">Outras melhorias e ajustes:</h5>
+          <ul style="margin: 0; padding-left: 20px; font-size: 0.85rem; color: #cbd5e1; line-height: 1.6;">
+            <li><strong style="color: #38bdf8;">🔧 Animação:</strong> Ajuste na animação piscante sem deslocar o marcador no Leaflet.</li>
+            <li><strong style="color: #f87171;">🐛 Correção:</strong> Agrupamento corrigido na exportação de relatórios em CSV.</li>
+            <li><strong style="color: #f87171;">🐛 Correção:</strong> Removido Bug de visualização em modo leitura.</li>
+          </ul>
+        </div>
+      </div>
+
+      <!-- VERSÃO ANTERIOR (2.0.0) -->
+      <div style="background: #1e293b; border: 1px solid #334155; border-radius: 10px; padding: 16px; opacity: 0.85;">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+          <span style="font-weight: bold; font-size: 1rem; color: #cbd5e1;">v2.0.0 — Galeria e Autenticação</span>
+          <span style="font-size: 0.75rem; color: #94a3b8; background: #0f172a; padding: 2px 8px; border-radius: 12px;">15/09/2026</span>
+        </div>
+        <ul style="margin: 0; padding-left: 20px; font-size: 0.85rem; color: #cbd5e1; line-height: 1.6;">
+          <li><strong style="color: #4ade80;">✨ Galeria:</strong> Upload múltiplo de fotos por equipamento com suporte a visualização em grelha.</li>
+          <li><strong style="color: #4ade80;">✨ Relatórios:</strong> Módulo de relatório geral com opção de impressão e exportação.</li>
+        </ul>
+      </div>
+
+    </div>
+
+    <!-- Rodapé -->
+    <div style="margin-top: 15px; text-align: right; border-top: 1px solid #334155; padding-top: 12px;">
+      <button class="btn-submit" onclick="fecharModalPatchNotes()" style="width: auto; padding: 8px 24px;">Entendido e Continuar</button>
+    </div>
+
+  </div>
+</div>
+
+    </div>
+
+    <div style="margin-top: 16px; text-align: right; border-top: 1px solid #334155; padding-top: 12px;">
+      <button class="btn-submit" onclick="fecharModalPatchNotes()" style="width: auto; padding: 6px 20px;">Entendido</button>
+    </div>
+  </div>
+</div>
+
+  <!-- Modal para Inserir Texto no Mapa -->
+  <div class="modal-overlay" id="modal-texto" style="display: none;">
+    <div class="modal-content" style="max-width: 400px;">
+      <div class="modal-header">
+        <h2>Adicionar Texto no Mapa</h2>
+        <button class="close-btn" onclick="fecharModalTexto()">&times;</button>
+      </div>
+
+      <form id="form-texto-mapa">
+        <input type="hidden" id="texto_pos_x">
+        <input type="hidden" id="texto_pos_y">
+        
+        <div class="form-group">
+          <label>Texto:</label>
+          <input type="text" id="input-conteudo-texto" placeholder="Ex: Pavilhão 2 - Setor de Alimentação" required>
+        </div>
+
+        <div style="display: flex; gap: 10px;">
+          <div class="form-group" style="flex: 1;">
+            <label>Tamanho da Fonte (px):</label>
+            <input type="number" id="input-tamanho-fonte" value="16" min="10" max="60">
+          </div>
+          <div class="form-group" style="flex: 1;">
+            <label>Cor do Texto:</label>
+            <input type="color" id="input-cor-texto" value="#ffffff" style="width: 100%; height: 38px; padding: 0; background: none; border: 1px solid #444; cursor: pointer;">
+          </div>
+        </div>
+
+        <button type="submit" class="btn-submit">Salvar Texto no Mapa</button>
+      </form>
+    </div>
+  </div>
+
+  <!-- Modal de Cadastro/Edição/Visualização no Mapa -->
+  <div class="modal-overlay" id="modal-cadastro">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h2 id="modal-titulo">Cadastrar Equipamento</h2>
+        <button class="close-btn" onclick="fecharModal()">&times;</button>
+      </div>
+
+      <form id="form-equipamento">
+        <input type="hidden" id="equipamento_id">
+        <input type="hidden" id="pos_x">
+        <input type="hidden" id="pos_y">
+        
+        <div class="form-group">
+          <label>Tipo do Dispositivo:</label>
+          <select id="tipo_equipamento" onchange="alternarCamposAP()">
+            <option value="AP">Access Point (AP)</option>
+            <option value="Roteador">Roteador</option>
+            <option value="Switch">Switch</option>
+            <option value="Rack">Rack</option>
+            <option value="Outro">Outro</option>
+          </select>
+        </div>
+
+        <div class="form-group" id="group-modelo-ap">
+          <label>Modelo do Access Point (Ícone):</label>
+          <select id="modelo_ap">
+            <option value="ap_indoor">📡 AP Indoor (Unifi / Teto)</option>
+            <option value="ap_outdoor">📶 AP Outdoor / Setorial</option>
+            <option value="ap_omni">🌐 AP Antena Omni</option>
+            <option value="ap_ptp">🎯 AP Ponto a Ponto (PTP)</option>
+          </select>
+        </div>
+
+        <div class="form-group">
+          <label>Nome/Tag do Ponto:</label>
+          <input type="text" id="nome" placeholder="Ex: AP-PAVILHAO-01" required>
+        </div>
+
+        <div class="form-group">
+          <label>Endereço MAC:</label>
+          <input type="text" id="mac" placeholder="AA:BB:CC:DD:EE:FF">
+        </div>
+
+        <div class="form-group">
+          <label>Número de Série (S/N):</label>
+          <input type="text" id="sn">
+        </div>
+
+        <div class="form-group">
+          <label>Fabricante:</label>
+          <input type="text" id="fabricante">
+        </div>
+
+        <div class="form-group">
+          <label>Modelo:</label>
+          <input type="text" id="modelo" placeholder="Ex: UniFi AC Pro">
+        </div>
+
+        <div class="form-group">
+          <label>Área / Localização:</label>
+          <input type="text" id="area_equipamento" list="lista-areas" placeholder="Ex: Pavilhão 1">
+          <datalist id="lista-areas">
+            <option value="Pavilhão 1">
+            <option value="Pavilhão 2">
+            <option value="Centro de Eventos Superior">
+            <option value="Centro de Eventos Inferior">
+            <option value="POP Festa da Uva">
+            <option value="Tulipa">
+          </datalist>
+        </div>
+
+        <div class="form-group" id="group-associar-rack">
+          <label>Associar a um Rack (opcional):</label>
+          <select id="associar_rack">
+            <option value="">— Nenhum —</option>
+          </select>
+        </div>
+
+        <div class="form-group">
+          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
+            <label style="margin: 0;">Fotos & Galeria:</label>
+            <button type="button" id="btn-abrir-todas-fotos" onclick="abrirTodasAsFotos()" style="display: none; background: #2563eb; color: #fff; border: none; border-radius: 4px; padding: 3px 8px; font-size: 0.75rem; cursor: pointer; font-weight: bold;">📂 Abrir todas as fotos</button>
+          </div>
+          
+          <div id="preview-container-foto" style="margin-bottom: 8px; display: none;">
+            <a id="link-foto-atual" href="#" target="_blank">
+              <img id="img-foto-atual" src="" style="width: 100%; max-height: 140px; object-fit: cover; border-radius: 6px; border: 1px solid #444;" title="Clique para ampliar">
+            </a>
+            <div id="container-btn-excluir-foto" style="display: flex; justify-content: space-between; align-items: center; margin-top: 4px;">
+              <span style="font-size: 0.75rem; color: #888;">Foto principal atual</span>
+              <button type="button" onclick="removerFotoAtual()" style="background: #ff5252; color: #fff; border: none; border-radius: 4px; padding: 2px 8px; font-size: 0.75rem; cursor: pointer; font-weight: bold;">🗑️ Excluir Foto Principal</button>
+            </div>
+          </div>
+
+          <label style="font-size: 0.75rem; color: #aaa; margin-top: 4px;">Adicionar novas fotos (várias de uma vez):</label>
+          <input type="file" id="foto" accept="image/*" multiple>
+          
+          <div id="galeria-fotos" style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-top: 10px;"></div>
+        </div>
+
+        <button type="submit" class="btn-submit" id="btn-submit-form">Salvar no Supabase</button>
+      </form>
+    </div>
+  </div>
+
+  <!-- Modal de Relatório Geral -->
+  <div id="modal-relatorio" style="display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.6); z-index:9999; justify-content:center; align-items:center;">
+    <div style="background:#1e293b; color:#fff; padding:24px; border-radius:12px; width:90%; max-width:800px; max-height:85vh; display:flex; flex-direction:column; box-shadow:0 10px 25px rgba(0,0,0,0.5);">
+      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:16px;">
+        <h2 style="margin:0; font-size:1.25rem;">📊 Relatório Geral de Ativos e Racks</h2>
+        <button onclick="fecharModalRelatorio()" style="background:none; border:none; color:#fff; font-size:1.5rem; cursor:pointer;">&times;</button>
+      </div>
+      
+      <div style="display:flex; gap:10px; margin-bottom:15px;">
+        <button onclick="exportarRelatorioCSV()" style="background:#10b981; color:#fff; border:none; padding:8px 16px; border-radius:6px; cursor:pointer; font-weight:bold;">📥 Baixar CSV (Excel)</button>
+        <button onclick="window.print()" style="background:#3b82f6; color:#fff; border:none; padding:8px 16px; border-radius:6px; cursor:pointer; font-weight:bold;">🖨️ Imprimir / Salvar PDF</button>
+      </div>
+
+      <div style="overflow-y:auto; flex-grow:1; border:1px solid #334155; border-radius:6px;">
+        <table id="tabela-relatorio-geral" style="width:100%; border-collapse:collapse; text-align:left; font-size:0.9rem;">
+          <thead style="background:#0f172a; position:sticky; top:0;">
+            <tr>
+              <th style="padding:10px; border-bottom:1px solid #334155;">Nome do Item</th>
+              <th style="padding:10px; border-bottom:1px solid #334155;">Tipo</th>
+              <th style="padding:10px; border-bottom:1px solid #334155;">Modelo / Fabricante</th>
+              <th style="padding:10px; border-bottom:1px solid #334155;">MAC Address</th>
+              <th style="padding:10px; border-bottom:1px solid #334155;">Serial Number (SN)</th>
+              <th style="padding:10px; border-bottom:1px solid #334155;">Localização</th>
+              <th style="padding:10px; border-bottom:1px solid #334155;">Posição</th>
+            </tr>
+          </thead>
+          <tbody id="corpo-tabela-relatorio">
+            <!-- Preenchido via JavaScript, agrupado por Área -->
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal Visual do Rack -->
+  <div class="modal-overlay" id="modal-rack">
+    <div class="modal-content wide">
+      <div class="modal-header">
+        <h2 id="rack-titulo">Visualização Interna do Rack</h2>
+        <div style="display:flex; gap:8px; align-items:center;">
+          <button type="button" onclick="destacarEquipamentosDoRack(document.getElementById('rack_id_atual').value)" style="background:#dc2626; color:#fff; border:none; border-radius:6px; padding:6px 10px; font-size:0.8rem; cursor:pointer; font-weight:bold;">🔴 Localizar no Mapa</button>
+          <button class="close-btn" onclick="fecharModalRack()">&times;</button>
+        </div>
+      </div>
+
+      <div class="rack-container">
+        <div class="rack-frame-wrapper">
+          <h3 style="margin-top: 0; color: #00e676; font-size: 0.95rem;">Trilho de Equipamentos (Us)</h3>
+          <div class="rack-frame" id="rack-frame"></div>
+        </div>
+
+        <div class="rack-form-side">
+          <div id="bloco-form-u-rack" style="background: #252525; padding: 12px; border-radius: 8px; border: 1px solid #333;">
+            <h4 style="margin: 0 0 10px 0; color: #00e676; font-size: 0.9rem;">+ Adicionar Equipamento no Trilho (U)</h4>
+
+            <form id="form-item-rack">
+              <input type="hidden" id="rack_id_atual">
+
+              <div class="form-group">
+                <label>Nome do Equipamento:</label>
+                <input type="text" id="rack_item_nome" placeholder="Ex: Switch Core 24P" required>
+              </div>
+
+              <div class="form-group">
+                <label>Modelo:</label>
+                <input type="text" id="rack_item_modelo" placeholder="Ex: CCR1004, Catalyst 2960...">
+              </div>
+
+              <div style="display: flex; gap: 8px;">
+                <div class="form-group" style="flex: 1;">
+                  <label>Tipo:</label>
+                  <select id="rack_item_tipo">
+                    <option value="Switch">Switch</option>
+                    <option value="Patch Panel">Patch Panel</option>
+                    <option value="OLT">OLT</option>
+                    <option value="Servidor">Servidor</option>
+                    <option value="DIO">DIO</option>
+                    <option value="Outro">Outro</option>
+                  </select>
+                </div>
+                <div class="form-group" style="width: 80px;">
+                  <label>Posição U:</label>
+                  <input type="number" id="rack_item_u" min="1" max="44" value="1" required>
+                </div>
+                <div class="form-group" style="width: 80px;">
+                  <label>Tamanho U:</label>
+                  <input type="number" id="rack_item_tamanho" min="1" max="10" value="1" required>
+                </div>
+              </div>
+
+              <button type="submit" class="btn-submit" style="padding: 8px; font-size: 0.85rem;">Alocar no Trilho</button>
+            </form>
+          </div>
+
+          <div id="bloco-form-extra-rack" style="background: #252525; padding: 12px; border-radius: 8px; border: 1px solid #333;">
+            <h4 style="margin: 0 0 10px 0; color: #00e5ff; font-size: 0.9rem;">+ Componentes & Acessórios (Fora do U)</h4>
+            <form id="form-item-extra-rack">
+              <div style="display: flex; gap: 8px;">
+                <div class="form-group" style="flex: 2;">
+                  <input type="text" id="extra_nome" placeholder="Ex: Módulo GBIC 10G / NoBreak 1500VA" required>
+                </div>
+                <div class="form-group" style="flex: 1;">
+                  <select id="extra_tipo">
+                    <option value="GBIC / SFP">GBIC / SFP</option>
+                    <option value="NoBreak / Fonte">NoBreak / Fonte</option>
+                    <option value="Régua Elétrica">Régua Elétrica</option>
+                    <option value="Organizador / Guia">Organizador / Guia</option>
+                    <option value="Outro Acessório">Outro Acessório</option>
+                  </select>
+                </div>
+              </div>
+              <div style="display: flex; gap: 8px;">
+                <div class="form-group" style="flex: 1;">
+                  <input type="text" id="extra_detalhes" placeholder="Detalhes (Ex: Porta SFP+ 1)">
+                </div>
+                <div class="form-group" style="width: 90px;">
+                  <input type="number" id="extra_qtd" placeholder="Qtd" value="1" min="1" required>
+                </div>
+              </div>
+              <button type="submit" class="btn-submit" style="background: #00e5ff; color: #000; padding: 8px; font-size: 0.85rem;">Cadastrar Acessório</button>
+            </form>
+        
+          </div>
+          <div style="margin-top: 12px; max-height: 180px; overflow-y: auto; background: #1a1a1a; border-radius: 6px; padding: 8px;" id="lista-extras-rack"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Marca d'Água Discreta -->
+<div id="marca-dagua">
+  Desenvolvido por <span>Tauam Lucas</span>
+</div>
+
+  <script src="./script.js"></script>
+  <script>
+    if (typeof checarSessaoInicial === 'function') {
+      checarSessaoInicial();
+    }
+  </script>
+</body>
+</html>
